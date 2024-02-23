@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/redis/go-redis/v9"
+	"runtime"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -17,42 +19,62 @@ var mutexScript = struct {
 
 type Mutex struct {
 	ctx         context.Context
-	lockName    string
 	redisClient *redis.Client
+	lockName    string
 	InstanceID  string
+
+	pubSubCount int
+	pubSubMux   sync.Mutex
+	pubSub      *redis.PubSub
 
 	expiration  time.Duration
 	waitTimeout time.Duration
 
 	freeCh chan struct{}
+
+	closeOnce sync.Once
+	closed    bool
 }
 
-func NewMutex(ctx context.Context, redisClient *redis.Client, InstanceID string, lockName string) *Mutex {
-	return &Mutex{
+func NewMutex(ctx context.Context, redisClient *redis.Client, InstanceID string, lockName string) (*Mutex, error) {
+	mutex := &Mutex{
 		ctx:         ctx,
-		lockName:    lockName,
 		redisClient: redisClient,
+		lockName:    lockName,
 		InstanceID:  InstanceID,
+
+		pubSub: redisClient.Subscribe(ctx, ChannelName(lockName)),
 
 		expiration:  10 * time.Second,
 		waitTimeout: 30 * time.Second,
 	}
+	//注册析构函数
+	runtime.SetFinalizer(mutex, func(mux *Mutex) {
+		mux.Close()
+	})
+	//将订阅释放锁通知的操作放至调用lock方法
+	if err := mutex.pubSub.Unsubscribe(ctx, ChannelName(lockName)); err != nil {
+		return nil, err
+	}
+	return mutex, nil
 }
 
 func (m *Mutex) Lock() error {
-	//单位：ms
-	expiration := int64(m.expiration / time.Millisecond)
+	m.assertClose()
+
+	lifetimeMillisecond := int64(m.expiration / time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(m.ctx, m.waitTimeout)
 	defer cancel()
 
-	pubSub := m.redisClient.Subscribe(ctx, ChannelName(m.lockName))
-	defer pubSub.Close()
-	defer pubSub.Unsubscribe(ctx, ChannelName(m.lockName))
+	//订阅锁释放事件
+	if err := m.subscribe(); err != nil {
+		return err
+	}
+	defer m.unsubscribe()
 
 	threadID := m.InstanceID + ":" + strconv.FormatInt(GoroutineID(), 10)
-	err := m.tryLock(ctx, pubSub, threadID, expiration)
-	if err != nil {
+	if err := m.tryLock(ctx, threadID, lifetimeMillisecond); err != nil {
 		return err
 	}
 
@@ -71,7 +93,7 @@ func (m *Mutex) Lock() error {
 			case <-ticker.C:
 				if res, err := m.redisClient.Eval(
 					m.ctx, mutexScript.renewalScript,
-					[]string{LockName(m.lockName)}, expiration, threadID,
+					[]string{LockName(m.lockName)}, lifetimeMillisecond, threadID,
 				).Int64(); err != nil || res == 0 {
 					return
 				}
@@ -81,9 +103,9 @@ func (m *Mutex) Lock() error {
 	return nil
 }
 
-func (m *Mutex) tryLock(ctx context.Context, pubSub *redis.PubSub, ID string, expiration int64) error {
+func (m *Mutex) tryLock(ctx context.Context, ID string, lifetimeMillisecond int64) error {
 	// 尝试加锁
-	pTTL, err := m.lockInner(ID, expiration)
+	pTTL, err := m.lockInner(ID, lifetimeMillisecond)
 	if err != nil {
 		return err
 	}
@@ -100,10 +122,10 @@ func (m *Mutex) tryLock(ctx context.Context, pubSub *redis.PubSub, ID string, ex
 		return ErrWaitTimeout
 	case <-ttlTimer.C:
 		//针对“redis 中存在未维护的锁”，即当锁自然过期后，并不会发布通知的锁
-		return m.tryLock(ctx, pubSub, ID, expiration)
-	case <-pubSub.Channel():
+		return m.tryLock(ctx, ID, lifetimeMillisecond)
+	case <-m.pubSub.Channel():
 		//收到解锁通知，则尝试抢锁
-		return m.tryLock(ctx, pubSub, ID, expiration)
+		return m.tryLock(ctx, ID, lifetimeMillisecond)
 	}
 }
 
@@ -123,8 +145,9 @@ func (m *Mutex) lockInner(ID string, expiration int64) (int64, error) {
 }
 
 func (m *Mutex) Unlock() error {
-	goID := GoroutineID()
+	m.assertClose()
 
+	goID := GoroutineID()
 	if err := m.unlockInner(goID); err != nil {
 		return fmt.Errorf("unlock err: %w", err)
 	}
@@ -149,6 +172,50 @@ func (m *Mutex) unlockInner(goID int64) error {
 		return ErrMismatch
 	}
 	return nil
+}
+
+func (m *Mutex) subscribe() error {
+	m.pubSubMux.Lock()
+	defer m.pubSubMux.Unlock()
+
+	m.pubSubCount++
+	if m.pubSubCount == 1 {
+		if err := m.pubSub.Subscribe(m.ctx, ChannelName(m.lockName)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Mutex) unsubscribe() error {
+	m.pubSubMux.Lock()
+	defer m.pubSubMux.Unlock()
+
+	if m.pubSubCount <= 0 {
+		panic("unsubscribe must be called after subscribe")
+	}
+
+	m.pubSubCount--
+	if m.pubSubCount == 0 {
+		if err := m.pubSub.Unsubscribe(m.ctx, ChannelName(m.lockName)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Mutex) Close() (err error) {
+	m.closeOnce.Do(func() {
+		m.closed = true
+		err = m.pubSub.Close()
+	})
+	return
+}
+
+func (m *Mutex) assertClose() {
+	if m.closed {
+		panic("do not call a closed lock")
+	}
 }
 
 func init() {
