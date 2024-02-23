@@ -15,7 +15,7 @@ if err = mu.Lock(); err != nil {
   log.Fatal(err)
 }
 if err = mu.Unlock(); err != nil {
-  log.Fatal(23, err)
+  log.Fatal(err)
 }
 
 ```
