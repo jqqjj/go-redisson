@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-// GoroutineID
+// goroutineID
 // @Description: get the id of current goroutine
 // @return int64
-func GoroutineID() int64 {
+func goroutineID() int64 {
 	buf := make([]byte, 35)
 	runtime.Stack(buf, false)
 	s := string(buf)
@@ -17,10 +17,10 @@ func GoroutineID() int64 {
 	return parseInt
 }
 
-func ChannelName(name string) string {
+func channelName(name string) string {
 	return "_redisson_channel_" + "{" + name + "}"
 }
 
-func LockName(name string) string {
+func lockName(name string) string {
 	return "_redisson_lock_" + "{" + name + "}"
 }

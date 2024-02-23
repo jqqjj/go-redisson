@@ -21,7 +21,7 @@ type Mutex struct {
 	ctx         context.Context
 	redisClient *redis.Client
 	lockName    string
-	InstanceID  string
+	instanceID  string
 
 	pubSubCount int
 	pubSubMux   sync.Mutex
@@ -36,14 +36,14 @@ type Mutex struct {
 	closed    bool
 }
 
-func NewMutex(ctx context.Context, redisClient *redis.Client, InstanceID string, lockName string) (*Mutex, error) {
+func NewMutex(ctx context.Context, redisClient *redis.Client, instanceID string, lockName string) (*Mutex, error) {
 	mutex := &Mutex{
 		ctx:         ctx,
 		redisClient: redisClient,
 		lockName:    lockName,
-		InstanceID:  InstanceID,
+		instanceID:  instanceID,
 
-		pubSub: redisClient.Subscribe(ctx, ChannelName(lockName)),
+		pubSub: redisClient.Subscribe(ctx, channelName(lockName)),
 
 		expiration:  10 * time.Second,
 		waitTimeout: 30 * time.Second,
@@ -53,7 +53,7 @@ func NewMutex(ctx context.Context, redisClient *redis.Client, InstanceID string,
 		mux.Close()
 	})
 	//将订阅释放锁通知的操作放至调用lock方法
-	if err := mutex.pubSub.Unsubscribe(ctx, ChannelName(lockName)); err != nil {
+	if err := mutex.pubSub.Unsubscribe(ctx, channelName(lockName)); err != nil {
 		return nil, err
 	}
 	return mutex, nil
@@ -73,7 +73,7 @@ func (m *Mutex) Lock() error {
 	}
 	defer m.unsubscribe()
 
-	threadID := m.InstanceID + ":" + strconv.FormatInt(GoroutineID(), 10)
+	threadID := m.instanceID + ":" + strconv.FormatInt(goroutineID(), 10)
 	if err := m.tryLock(ctx, threadID, lifetimeMillisecond); err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func (m *Mutex) Lock() error {
 			case <-ticker.C:
 				if res, err := m.redisClient.Eval(
 					m.ctx, mutexScript.renewalScript,
-					[]string{LockName(m.lockName)}, lifetimeMillisecond, threadID,
+					[]string{lockName(m.lockName)}, lifetimeMillisecond, threadID,
 				).Int64(); err != nil || res == 0 {
 					return
 				}
@@ -132,7 +132,7 @@ func (m *Mutex) tryLock(ctx context.Context, ID string, lifetimeMillisecond int6
 func (m *Mutex) lockInner(ID string, expiration int64) (int64, error) {
 	pTTL, err := m.redisClient.Eval(
 		m.ctx, mutexScript.lockScript,
-		[]string{LockName(m.lockName)}, ID,
+		[]string{lockName(m.lockName)}, ID,
 		expiration,
 	).Result()
 	if errors.Is(err, redis.Nil) {
@@ -147,7 +147,7 @@ func (m *Mutex) lockInner(ID string, expiration int64) (int64, error) {
 func (m *Mutex) Unlock() error {
 	m.assertClose()
 
-	goID := GoroutineID()
+	goID := goroutineID()
 	if err := m.unlockInner(goID); err != nil {
 		return fmt.Errorf("unlock err: %w", err)
 	}
@@ -162,8 +162,8 @@ func (m *Mutex) Unlock() error {
 func (m *Mutex) unlockInner(goID int64) error {
 	res, err := m.redisClient.Eval(
 		m.ctx, mutexScript.unlockScript,
-		[]string{LockName(m.lockName), ChannelName(m.lockName)},
-		m.InstanceID+":"+strconv.FormatInt(goID, 10), 1,
+		[]string{lockName(m.lockName), channelName(m.lockName)},
+		m.instanceID+":"+strconv.FormatInt(goID, 10), 1,
 	).Int64()
 	if err != nil {
 		return err
@@ -180,7 +180,7 @@ func (m *Mutex) subscribe() error {
 
 	m.pubSubCount++
 	if m.pubSubCount == 1 {
-		if err := m.pubSub.Subscribe(m.ctx, ChannelName(m.lockName)); err != nil {
+		if err := m.pubSub.Subscribe(m.ctx, channelName(m.lockName)); err != nil {
 			return err
 		}
 	}
@@ -197,7 +197,7 @@ func (m *Mutex) unsubscribe() error {
 
 	m.pubSubCount--
 	if m.pubSubCount == 0 {
-		if err := m.pubSub.Unsubscribe(m.ctx, ChannelName(m.lockName)); err != nil {
+		if err := m.pubSub.Unsubscribe(m.ctx, channelName(m.lockName)); err != nil {
 			return err
 		}
 	}
