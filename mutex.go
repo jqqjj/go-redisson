@@ -149,7 +149,7 @@ func (m *Mutex) Unlock() error {
 
 	goID := goroutineID()
 	if err := m.unlockInner(goID); err != nil {
-		return fmt.Errorf("unlock err: %w", err)
+		return fmt.Errorf("unlock err: %v", err)
 	}
 
 	if m.freeCh != nil {
