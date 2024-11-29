@@ -9,6 +9,7 @@ const rootCodeSpace = "redisson"
 var (
 	ErrWaitTimeout = register(rootCodeSpace, 10000, "wait timeout")
 	ErrMismatch    = register(rootCodeSpace, 20001, "identity mismatch")
+	ErrClosed      = register(rootCodeSpace, 20002, "closed locker")
 )
 
 var usedCode = map[string]struct{}{}
