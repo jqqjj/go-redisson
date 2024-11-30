@@ -28,8 +28,7 @@ func c(ID string) {
 	}
 
 	//ctx, _ := context.WithTimeout(context.Background(), time.Second*30)
-	ctx, _ := context.WithCancel(context.Background())
-	lock, err := redisson.NewMutex(ctx, db, ID, "1")
+	lock, err := redisson.NewMutex(db, ID, "1")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -72,8 +71,7 @@ func b(ID string) {
 	}
 
 	//ctx, _ := context.WithTimeout(context.Background(), time.Second*30)
-	ctx, _ := context.WithCancel(context.Background())
-	lock, err := redisson.NewMutex(ctx, db, ID, "1")
+	lock, err := redisson.NewMutex(db, ID, "1")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -81,12 +79,12 @@ func b(ID string) {
 	_ = lock
 	go func() {
 		for {
-			time.Sleep(time.Second * 5)
+			time.Sleep(time.Second * 3)
 			log.Println(runtime.NumGoroutine())
 		}
 	}()
 
-	time.Sleep(time.Second * 8)
+	time.Sleep(time.Second * 5)
 
 	go func() {
 		a("CC")
@@ -112,8 +110,7 @@ func a(ID string) {
 	}
 
 	//ctx, _ := context.WithTimeout(context.Background(), time.Second*30)
-	ctx, _ := context.WithCancel(context.Background())
-	lock, err := redisson.NewMutex(ctx, db, ID, "1")
+	lock, err := redisson.NewMutex(db, ID, "1")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -127,16 +124,17 @@ func a(ID string) {
 		var err error
 		for i := 0; i < 50; i++ {
 			if err = lock.Lock(); err != nil {
-				log.Fatalf("(%s:%d)加锁失败: %v", ID, goroutineID(), err)
+				log.Printf("(%s:%d)加锁失败: %v", ID, goroutineID(), err)
+				return
 			}
 			time.Sleep(time.Millisecond * 5)
 			log.Printf("(%s:%d)+++++", ID, goroutineID())
-			time.Sleep(time.Millisecond * 100)
+			time.Sleep(time.Second * 10)
 			if err = lock.Unlock(); err != nil {
 				log.Fatalf("(%s:%d)解锁失败: %v", ID, goroutineID(), err)
 			}
 			log.Printf("(%s:%d)-----", ID, goroutineID())
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond * 10)
 		}
 	}()
 	go func() {
@@ -144,16 +142,17 @@ func a(ID string) {
 		var err error
 		for i := 0; i < 50; i++ {
 			if err = lock.Lock(); err != nil {
-				log.Fatalf("(%s:%d)加锁失败: %v", ID, goroutineID(), err)
+				log.Printf("(%s:%d)加锁失败: %v", ID, goroutineID(), err)
+				return
 			}
 			time.Sleep(time.Millisecond * 5)
 			log.Printf("(%s:%d)+++++", ID, goroutineID())
-			time.Sleep(time.Millisecond * 100)
+			time.Sleep(time.Second * 10)
 			if err = lock.Unlock(); err != nil {
 				log.Fatalf("(%s:%d)解锁失败: %v", ID, goroutineID(), err)
 			}
 			log.Printf("(%s:%d)-----", ID, goroutineID())
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond * 10)
 		}
 	}()
 

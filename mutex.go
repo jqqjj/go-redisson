@@ -17,16 +17,12 @@ var mutexScript = struct {
 }{}
 
 type Mutex struct {
-	ctx         context.Context
 	redisClient *redis.Client
-	lockName    string
 	instanceID  string
+	lockName    string
 
 	redisPubSubMux sync.Mutex
 	redisPubSub    *redis.PubSub
-
-	expiration  time.Duration
-	waitTimeout time.Duration
 
 	startOnce sync.Once
 	closeOnce sync.Once
@@ -34,17 +30,14 @@ type Mutex struct {
 	pubSub    *PubSub[string, string]
 }
 
-func NewMutex(ctx context.Context, redisClient *redis.Client, instanceID string, lockName string) (*Mutex, error) {
+func NewMutex(redisClient *redis.Client, instanceID string, lockName string) (*Mutex, error) {
 	mutex := &Mutex{
-		ctx:         ctx,
 		redisClient: redisClient,
 		lockName:    lockName,
 		instanceID:  instanceID,
 
-		expiration:  10 * time.Second,
-		waitTimeout: 30 * time.Second,
-		closed:      make(chan struct{}),
-		pubSub:      NewPubSub[string, string](),
+		closed: make(chan struct{}),
+		pubSub: NewPubSub[string, string](),
 	}
 	//注册析构函数
 	runtime.SetFinalizer(mutex, func(mux *Mutex) {
@@ -59,24 +52,24 @@ func (m *Mutex) Lock() error {
 		return ErrClosed
 	}
 
-	ctx, cancel := context.WithTimeout(m.ctx, m.waitTimeout)
+	//设置抢占锁超时时间，60秒抢不到就报错
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	noticeFree := make(chan string)
 	m.pubSub.Subscribe(ctx, channelName(m.lockName), noticeFree)
 
-	lifetimeMillisecond := int64(m.expiration / time.Millisecond)
+	var lockLifetimeSecond int64 = 15 //锁只保留15秒
 	fromId := m.instanceID + ":" + strconv.FormatInt(goroutineID(), 10)
-	if err := m.tryLock(ctx, fromId, noticeFree, lifetimeMillisecond); err != nil {
+	if err := m.tryLock(ctx, fromId, noticeFree, lockLifetimeSecond*1000); err != nil {
 		return err
 	}
 
-	//加锁成功，开个协程，定时续锁
 	go func() {
-		ctx, cancel := context.WithCancel(m.ctx)
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		ticker := time.NewTicker(m.expiration / 3)
+		ticker := time.NewTicker(time.Duration(lockLifetimeSecond) * time.Second / 3) //仅三分之一时间时，自动续锁
 		defer ticker.Stop()
 		ch := make(chan string)
 		m.pubSub.Subscribe(ctx, channelName(m.lockName), ch)
@@ -88,8 +81,8 @@ func (m *Mutex) Lock() error {
 				}
 			case <-ticker.C:
 				if res, err := m.redisClient.Eval(
-					m.ctx, mutexScript.renewalScript,
-					[]string{lockName(m.lockName)}, fromId, lifetimeMillisecond,
+					context.Background(), mutexScript.renewalScript,
+					[]string{lockName(m.lockName)}, fromId, lockLifetimeSecond*1000,
 				).Int64(); err != nil || res == 0 {
 					return
 				}
@@ -127,7 +120,7 @@ func (m *Mutex) tryLock(ctx context.Context, fromId string, noticeFree chan stri
 
 func (m *Mutex) lockInner(fromId string, expiration int64) (int64, error) {
 	pTTL, err := m.redisClient.Eval(
-		m.ctx, mutexScript.lockScript,
+		context.Background(), mutexScript.lockScript,
 		[]string{lockName(m.lockName)}, fromId,
 		expiration,
 	).Result()
@@ -147,7 +140,7 @@ func (m *Mutex) Unlock() error {
 
 func (m *Mutex) unlockInner(fromId string) error {
 	res, err := m.redisClient.Eval(
-		m.ctx, mutexScript.unlockScript,
+		context.Background(), mutexScript.unlockScript,
 		[]string{lockName(m.lockName), channelName(m.lockName)}, fromId,
 	).Int64()
 	if err != nil {
@@ -206,7 +199,7 @@ func (m *Mutex) isClosed() bool {
 func init() {
 	mutexScript.lockScript = `
 	-- KEYS[1] 锁名
-	-- ARGV[1] 协程唯一标识：客户端标识+协程ID
+	-- ARGV[1] 锁来源：客户端标识+协程ID
 	-- ARGV[2] 过期时间
 	if redis.call('setnx',KEYS[1],ARGV[1]) == 1 then
 		redis.call('pexpire',KEYS[1],ARGV[2])
